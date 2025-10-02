@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no" />
+<title>水墨象棋 · V11.4（反消失加固）</title>
+<style>
+  :root{ --top:env(safe-area-inset-top);--bottom:env(safe-area-inset-bottom);--left:env(safe-area-inset-left);--right:env(safe-area-inset-right); }
+  html,body{margin:0;height:100%;background:#24170a;color:#1a1209;overscroll-behavior:contain;-webkit-text-size-adjust:100%;-webkit-user-select:none;user-select:none}
+  #app{position:fixed;inset:0;height:100dvh;padding:calc(var(--top)+6px) calc(var(--right)+8px) calc(var(--bottom)+6px) calc(var(--left)+8px);
+       display:grid;grid-template-rows:44px 1fr 54px;gap:8px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,'PingFang TC','Noto Sans TC',sans-serif}
+  header{display:flex;align-items:center}
+  .msg{flex:1;height:44px;display:flex;align-items:center;background:#f6f0e3;border:2px solid #5a3b1d;border-radius:12px;
+       padding:0 12px;font-weight:800;letter-spacing:1px;box-shadow:inset 0 0 0 1px #e7dcc8}
+  main{min-height:0;display:grid;place-items:center;position:relative}
+  .wrap{width:100%;height:100%;display:grid;place-items:center;position:relative}
+  canvas#game{width:100%;height:100%;aspect-ratio:9/10;background:#d3b785;border-radius:14px;box-shadow:0 12px 28px rgba(0,0,0,.5);touch-action:none;display:block}
+  canvas#fx{position:absolute;inset:0;pointer-events:none}
+  footer{display:flex;gap:12px;justify-content:center;align-items:center;height:54px}
+  .btn{min-width:110px;height:44px;padding:8px 14px;border-radius:12px;border:2px solid #231508;color:#fff;
+       background:linear-gradient(#5c4529,#3b2a16);font-weight:900;letter-spacing:2px;font-family:'Kaiti','STKaiti','DFKai-SB','PingFang TC',serif;box-shadow:0 3px 10px rgba(0,0,0,.45)}
+  .btn:active{transform:translateY(1px)}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center}
+  .dialog{background:#d5bb8e;border:2px solid #3b2b1a;border-radius:14px;padding:16px 14px;width:min(92vw,380px)}
+  .dialog h3{margin:0 0 10px} select{padding:6px 10px;border-radius:10px;border:1.5px solid #2b1c0e}
+</style>
+</head>
+<body>
+<div id="app">
+  <header><div id="msg" class="msg">現在該你走棋啦！</div></header>
+  <main>
+    <div class="wrap">
+      <canvas id="game" width="900" height="1000"></canvas>
+      <canvas id="fx" width="900" height="1000"></canvas>
+    </div>
+  </main>
+  <footer>
+    <button class="btn" id="undo">悔 棋（<span id="undoLeft">5</span>）</button>
+    <button class="btn" id="options">選 項</button>
+    <button class="btn" id="restart">重 開</button>
+  </footer>
+</div>
+
+<div id="modal" class="modal">
+  <div class="dialog">
+    <h3>遊戲選項</h3>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+      <div>難度</div>
+      <select id="difficulty">
+        <option value="easy">簡單</option>
+        <option value="normal" selected>入門</option>
+        <option value="hard">困難</option>
+      </select>
+    </div>
+    <label style="display:block;margin-top:10px"><input id="ruleRep" type="checkbox" checked> 三次循環判和</label>
+    <label style="display:block;margin:6px 0 12px"><input id="rule50" type="checkbox" checked> 120 半步無吃無兵判和</label>
+    <button class="btn" id="close">關 閉</button>
+  </div>
+</div>
+
+<script>
+/* ===== Core ===== */
+const DPR=Math.max(1,Math.min(3,window.devicePixelRatio||1));
+const Files=9,Ranks=10,Squares=90,MARGIN=20;
+const P={E:0,RK:1,RA:2,RB:3,RN:4,RR:5,RC:6,RP:7,BK:8,BA:9,BB:10,BN:11,BR:12,BC:13,BP:14};
+const isRed=p=>p>=P.RK&&p<=P.RP, isBlack=p=>p>=P.BK&&p<=P.BP;
+const F=i=>i%Files, R=i=>(i/Files|0), I=(f,r)=>r*Files+f;
+const cvs=document.getElementById('game'), ctx=cvs.getContext('2d',{alpha:false});
+const fxC=document.getElementById('fx'), fx=fxC.getContext('2d');
+const msgBox=document.getElementById('msg'), undoLeftEl=document.getElementById('undoLeft');
+let undoLeft=5, BUSY=false;
+
+/* ===== Fit ===== */
+function fit(){
+  const parent=cvs.parentElement.getBoundingClientRect();
+  const ar=9/10; let w=parent.width, h=parent.height;
+  let W=w, H=w/ar; if(H>h){H=h; W=h*ar;}
+  for(const el of [cvs,fxC]){ el.style.width=W+'px'; el.style.height=H+'px'; el.width=Math.round(W*DPR); el.height=Math.round(H*DPR); }
+  drawAll();
+}
+if(window.visualViewport){ visualViewport.addEventListener('resize',()=>setTimeout(fit,0)); visualViewport.addEventListener('scroll',()=>setTimeout(fit,0)); }
+addEventListener('resize',()=>setTimeout(fit,0)); addEventListener('orientationchange',()=>setTimeout(fit,0));
+setTimeout(fit,0);
+
+function cell(){ const W=cvs.width/DPR,H=cvs.height/DPR; return [(W-2*MARGIN)/(Files-1),(H-2*MARGIN)/(Ranks-1)]; }
+function g2p(f,r){ const [cw,ch]=cell(); return [MARGIN+f*cw, MARGIN+r*ch]; }
+function p2i(x,y){ const [cw,ch]=cell(); const fxr=(x-MARGIN)/cw, ryr=(y-MARGIN)/ch;
+  return I(Math.max(0,Math.min(8,Math.round(fxr))), Math.max(0,Math.min(9,Math.round(ryr)))); }
+
+/* ===== Board ===== */
+function wood(W,H){
+  const stripes=22; const step=(W-20)/stripes;
+  for(let i=0;i<stripes;i++){ const x=10+i*step; const base=i%2?'#d2b17b':'#d7bc8a'; ctx.fillStyle=base; ctx.fillRect(x,10,step+1,H-20); }
+}
+function board(){
+  const W=cvs.width/DPR,H=cvs.height/DPR,[cw,ch]=cell();
+  const yTop=MARGIN+4*ch, yBot=MARGIN+5*ch;
+  ctx.save(); ctx.scale(DPR,DPR);
+  ctx.fillStyle='#b99258'; ctx.fillRect(6,6,W-12,H-12);
+  ctx.strokeStyle='#201207'; ctx.lineWidth=6; ctx.strokeRect(6,6,W-12,H-12);
+  wood(W,H);
+  ctx.strokeStyle='#23160a'; ctx.lineWidth=4; ctx.strokeRect(MARGIN, MARGIN, W-2*MARGIN, H-2*MARGIN);
+  ctx.strokeStyle='#2a1a0c'; ctx.lineWidth=2.6;
+  for(let r=0;r<Ranks;r++){ ctx.beginPath(); ctx.moveTo(MARGIN, MARGIN+r*ch); ctx.lineTo(W-MARGIN, MARGIN+r*ch); ctx.stroke(); }
+  for(let f=0; f<Files; f++){ const x=MARGIN+f*cw; ctx.beginPath(); ctx.moveTo(x, MARGIN); ctx.lineTo(x, yTop); ctx.stroke(); ctx.beginPath(); ctx.moveTo(x, yBot); ctx.lineTo(x, H-MARGIN); ctx.stroke(); }
+  ctx.lineWidth=4; ctx.beginPath(); ctx.moveTo(MARGIN, yTop); ctx.lineTo(W-MARGIN, yTop); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(MARGIN, yBot); ctx.lineTo(W-MARGIN, yBot); ctx.stroke();
+  ctx.fillStyle='#2a1a0c'; ctx.font=`${Math.floor(ch*0.92)}px 'Kaiti',serif`; ctx.textAlign='center';
+  ctx.fillText('楚河', W/2 - 2*cw, MARGIN + 5*ch - ch*0.10);
+  ctx.fillText('漢界', W/2 + 2*cw, MARGIN + 5*ch - ch*0.10);
+  // palace diagonals
+  ctx.beginPath();
+  ctx.moveTo(MARGIN+3*cw, MARGIN+0*ch); ctx.lineTo(MARGIN+5*cw, MARGIN+2*ch);
+  ctx.moveTo(MARGIN+5*cw, MARGIN+0*ch); ctx.lineTo(MARGIN+3*cw, MARGIN+2*ch);
+  ctx.moveTo(MARGIN+3*cw, MARGIN+7*ch); ctx.lineTo(MARGIN+5*cw, MARGIN+9*ch);
+  ctx.moveTo(MARGIN+5*cw, MARGIN+7*ch); ctx.lineTo(MARGIN+3*cw, MARGIN+9*ch);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/* ===== Pieces ===== */
+function glyph(pc){return { [P.RR]:'車',[P.RN]:'馬',[P.RB]:'相',[P.RA]:'仕',[P.RK]:'帥',[P.RC]:'炮',[P.RP]:'兵',
+                             [P.BR]:'車',[P.BN]:'馬',[P.BB]:'象',[P.BA]:'士',[P.BK]:'將',[P.BC]:'炮',[P.BP]:'卒'}[pc]||''; }
+function drawPiece(i,pc){
+  const [x,y]=g2p(F(i),R(i)), [cw,ch]=cell(), size=Math.min(cw,ch)*0.86;
+  ctx.save(); ctx.scale(DPR,DPR); ctx.translate(x,y);
+  const g=ctx.createRadialGradient(0,-size*0.22,size*0.2,0,0,size/2);
+  g.addColorStop(0,'#fff2c4'); g.addColorStop(.55,'#d6b26e'); g.addColorStop(1,'#b1813c');
+  ctx.beginPath(); ctx.arc(0,0,size*0.50,0,Math.PI*2); ctx.fillStyle=g; ctx.shadowColor='rgba(0,0,0,.35)';
+  ctx.shadowBlur=6; ctx.shadowOffsetY=2; ctx.fill(); ctx.lineWidth=3.2; ctx.strokeStyle='#6f4b1f'; ctx.stroke();
+  ctx.beginPath(); ctx.arc(0,0,size*0.44,0,Math.PI*2); ctx.lineWidth=4.4; ctx.strokeStyle=isRed(pc)?'#d33228':'#1c6b3d'; ctx.stroke();
+  ctx.shadowColor='transparent'; ctx.fillStyle=isRed(pc)?'#d33228':'#1c6b3d';
+  ctx.font=`${Math.floor(size*0.60)}px 'Kaiti',serif`; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(glyph(pc),0,1);
+  ctx.restore();
+}
+
+/* ===== Engine ===== */
+class Pos{
+  constructor(){this.b=new Array(Squares).fill(0); this.red=true; this.hist=[]; this.reps=[]; this.halfClock=0;}
+  setStart(){this.b.fill(0);
+    this.b[I(0,0)]=P.RR; this.b[I(8,0)]=P.RR; this.b[I(1,0)]=P.RN; this.b[I(7,0)]=P.RN;
+    this.b[I(2,0)]=P.RB; this.b[I(6,0)]=P.RB; this.b[I(3,0)]=P.RA; this.b[I(5,0)]=P.RA; this.b[I(4,0)]=P.RK;
+    this.b[I(1,2)]=P.RC; this.b[I(7,2)]=P.RC; for(let f=0;f<9;f+=2) this.b[I(f,3)]=P.RP;
+    this.b[I(0,9)]=P.BR; this.b[I(8,9)]=P.BR; this.b[I(1,9)]=P.BN; this.b[I(7,9)]=P.BN;
+    this.b[I(2,9)]=P.BB; this.b[I(6,9)]=P.BB; this.b[I(3,9)]=P.BA; this.b[I(5,9)]=P.BA; this.b[I(4,9)]=P.BK;
+    this.b[I(1,7)]=P.BC; this.b[I(7,7)]=P.BC; for(let f=0;f<9;f+=2) this.b[I(f,6)]=P.BP;
+    this.red=true; this.hist=[]; this.reps=[this.key()]; this.halfClock=0;}
+  key(){return this.b.join(',')+(this.red?'r':'b');}
+  pieceCount(){ let c=0; for(const v of this.b) if(v) c++; return c; }
+  make(move){
+    const m = {from:move.from, to:move.to, cap:this.b[move.to]||0};
+    const moved=this.b[m.from];
+    const pcBefore=this.pieceCount();
+    this.hist.push(m);
+    this.b[m.to]=moved; this.b[m.from]=0; this.red=!this.red;
+    if(m.cap||moved===P.RP||moved===P.BP) this.halfClock=0; else this.halfClock++;
+    this.reps.push(this.key());
+    const pcAfter=this.pieceCount();
+    if(pcAfter !== pcBefore - (m.cap?1:0)){
+      this.unmake();
+      throw new Error('Sanity check failed: piece count mismatch');
+    }
+  }
+  unmake(){
+    const m=this.hist.pop(); if(!m) return;
+    const moved=this.b[m.to];
+    this.b[m.from]=moved; this.b[m.to]=m.cap||0; this.red=!this.red;
+    this.reps.pop(); this.halfClock=0;
+  }
+}
+function tryAdd(p,from,to,a){const mv=p.b[from], t=p.b[to]; if(!t||(isRed(mv)&&isBlack(t))||(isBlack(mv)&&isRed(t))) a.push({from,to,cap:t});}
+function genRook(p,i,a){const f=F(i),r=R(i),D=[[1,0],[-1,0],[0,1],[0,-1]]; for(const[df,dr] of D){let cf=f+df,cr=r+dr; while(cf>=0&&cf<Files&&cr>=0&&cr<Ranks){const to=I(cf,cr); if(!p.b[to]) tryAdd(p,i,to,a); else{tryAdd(p,i,to,a); break;} cf+=df; cr+=dr;}}}
+function genCannon(p,i,a){const f=F(i),r=R(i),D=[[1,0],[-1,0],[0,1],[0,-1]]; for(const[df,dr] of D){let cf=f+df,cr=r+dr,j=false; while(cf>=0&&cf<Files&&cr>=0&&cr<Ranks){const to=I(cf,cr); if(!j){if(!p.b[to]) tryAdd(p,i,to,a); else j=true;} else{ if(p.b[to]){tryAdd(p,i,to,a); break;} } cf+=df; cr+=dr;}}}
+function genKnight(p,i,a){const f=F(i),r=R(i),K=[[1,2],[2,1],[-1,2],[-2,1],[1,-2],[2,-1],[-1,-2],[-2,-1]];
+  for(const[df,dr] of K){const nf=f+df,nr=r+dr; if(nf<0||nf>=Files||nr<0||nr>=Ranks)continue; const lf=f+(df/2)|0, lr=r+(dr/2)|0; if(p.b[I(lf,lr)])continue; tryAdd(p,i,I(nf,nr),a);}}
+function genBishop(p,i,a){const f=F(i),r=R(i),B=[[2,2],[2,-2],[-2,2],[-2,-2]], red=isRed(p.b[i]);
+  for(const[df,dr] of B){const nf=f+df,nr=r+dr; if(nf<0||nf>=Files||nr<0||nr>=Ranks)continue; if(red&&nr>4)continue; if(!red&&nr<5)continue; const ef=f+df/2,er=r+dr/2; if(p.b[I(ef,er)])continue; tryAdd(p,i,I(nf,nr),a);}}
+function genAdvisor(p,i,a){const f=F(i),r=R(i),D=[[1,1],[1,-1],[-1,1],[-1,-1]], red=isRed(p.b[i]);
+  for(const[df,dr] of D){const nf=f+df,nr=r+dr; if(nf<3||nf>5)continue; if(red){if(nr<0||nr>2)continue;} else{if(nr<7||nr>9)continue;} tryAdd(p,i,I(nf,nr),a);}}
+function genKing(p,i,a){const f=F(i),r=R(i),D=[[1,0],[-1,0],[0,1],[0,-1]], red=isRed(p.b[i]);
+  for(const[df,dr] of D){const nf=f+df,nr=r+dr; if(nf<3||nf>5)continue; if(red){if(nr<0||nr>2)continue;} else{if(nr<7||nr>9)continue;} tryAdd(p,i,I(nf,nr),a);}}
+function genPawn(p,i,a){const f=F(i),r=R(i),red=isRed(p.b[i]),fw=red?1:-1; const nr=r+fw; if(nr>=0&&nr<Ranks) tryAdd(p,i,I(f,nr),a); if((red&&r>=5)||(!red&&r<=4)){ if(f>0) tryAdd(p,i,I(f-1,r),a); if(f<8) tryAdd(p,i,I(f+1,r),a);}}
+function kingsFace(p){let rf=-1,rr=-1,bf=-1,br=-1; for(let i=0;i<Squares;i++){if(p.b[i]===P.RK){rf=F(i); rr=R(i);} if(p.b[i]===P.BK){bf=F(i); br=R(i);} } if(rf!==bf) return false; for(let r=Math.min(rr,br)+1;r<Math.max(rr,br);r++){ if(p.b[I(rf,r)]) return false; } return true;}
+function inCheck(p,side){const target=side===0?P.RK:P.BK; let k=-1; for(let i=0;i<Squares;i++) if(p.b[i]===target){k=i;break;} if(k<0)return true;
+  const f=F(k),r=R(k),D=[[1,0],[-1,0],[0,1],[0,-1]];
+  for(const[df,dr] of D){let cf=f+df,cr=r+dr,screen=false; while(cf>=0&&cf<Files&&cr>=0&&cr<Ranks){const idx=I(cf,cr),pc=p.b[idx];
+    if(pc){ if(!screen){ if((side===0&&isBlack(pc)&&(pc===P.BR||pc===P.BK))||(side===1&&isRed(pc)&&(pc===P.RR||pc===P.RK))) return true; screen=true; }
+           else { if((side===0&&pc===P.BC)||(side===1&&pc===P.RC)) return true; break; } } cf+=df; cr+=dr; }}
+  const K=[[1,2],[2,1],[-1,2],[-2,1],[1,-2],[2,-1],[-1,-2],[-2,-1]];
+  for(const[df,dr] of K){const nf=f+df,nr=r+dr; if(nf<0||nf>=Files||nr<0||nr>=Ranks)continue; const lf=f+(df/2)|0,lr=r+(dr/2)|0; if(p.b[I(lf,lr)])continue; const pc=p.b[I(nf,nr)]; if(side===0&&pc===P.BN) return true; if(side===1&&pc===P.RN) return true;}
+  const er=r+(side===0?1:-1); if(er>=0&&er<Ranks){for(const ef of [f-1,f,f+1]){if(ef<0||ef>=Files)continue; const pc=p.b[I(ef,er)]; if(side===0&&pc===P.BP) return true; if(side===1&&pc===P.RP) return true;}}
+  return false;}
+function genMoves(p){const a=[]; for(let i=0;i<Squares;i++){const pc=p.b[i]; if(!pc)continue; if(p.red&&!isRed(pc))continue; if(!p.red&&!isBlack(pc))continue;
+  switch(pc){case P.RR:case P.BR:genRook(p,i,a);break; case P.RC:case P.BC:genCannon(p,i,a);break; case P.RN:case P.BN:genKnight(p,i,a);break;
+    case P.RB:case P.BB:genBishop(p,i,a);break; case P.RA:case P.BA:genAdvisor(p,i,a);break; case P.RK:case P.BK:genKing(p,i,a);break; case P.RP:case P.BP:genPawn(p,i,a);break;}}
+  for(let k=a.length-1;k>=0;k--){const m=a[k]; p.make(m); if(inCheck(p,p.red?1:0)||kingsFace(p)){p.unmake(); a.splice(k,1);} else p.unmake();} return a;}
+
+/* ===== AI ===== */
+const val=[0,10000,20,20,45,90,50,10,10000,20,20,45,90,50,10];
+const TT=new Map(); const killers=Array.from({length:16},()=>({from:-1,to:-1}));
+function evalPos(p){let s=0; for(let i=0;i<Squares;i++){const pc=p.b[i]; if(!pc)continue; let v=val[pc]; if(pc===P.RP) v+=2*R(i); if(pc===P.BP) v+=2*(9-R(i)); s+=isRed(pc)?v:-v;} return p.red?s:-s;}
+function orderMoves(p, list, pv, ply){
+  list.sort((a,b)=>{
+    if(pv && a.from===pv.from && a.to===pv.to) return -1;
+    if(pv && b.from===pv.from && b.to===pv.to) return 1;
+    const av=p.b[a.to]?val[p.b[a.to]]:0, bv=p.b[b.to]?val[p.b[b.to]]:0;
+    if(av!==bv) return bv-av;
+    const ka=killers[ply] && a.from===killers[ply].from && a.to===killers[ply].to;
+    const kb=killers[ply] && b.from===killers[ply].from && b.to===killers[ply].to;
+    if(ka!==kb) return ka?-1:1;
+    return 0;
+  });
+}
+function quickFallbackMove(p){
+  const moves = genMoves(p);
+  if(!moves.length) return null;
+  function score(m){ const cap = p.b[m.to]; let s = 0; if(cap) s += 100 + (val[cap]||0); const f = (m.to % 9); s -= Math.abs(f-4)*2; return s; }
+  moves.sort((a,b)=>score(b)-score(a)); return moves[0];
+}
+function searchBest(p, settings){
+  try{
+    const {depth, nodeLimit, randTop, timeMs} = settings;
+    const deadline = performance.now() + (timeMs||160);
+    let nodes=0, rootMoves=genMoves(p); if(!rootMoves.length) return null;
+    let rootScores=new Map(); let bestPV=null;
+    function timeUp(){ return performance.now() > deadline || nodes > nodeLimit; }
+    function q(alpha,beta){
+      nodes++; if(timeUp()) return evalPos(p);
+      let stand=evalPos(p);
+      if(stand>=beta) return beta;
+      if(alpha<stand) alpha=stand;
+      const caps=genMoves(p).filter(m=>p.b[m.to]);
+      for(const m of caps){ p.make(m); const sc=-q(-beta,-alpha); p.unmake(); if(sc>=beta) return beta; if(sc>alpha) alpha=sc; if(timeUp()) break; }
+      return alpha;
+    }
+    function ab(d, alpha, beta, ply){
+      nodes++; if(timeUp()) return evalPos(p);
+      if(d<=0) return q(alpha,beta);
+      const key=p.key(), hit=TT.get(key); let pv=null; if(hit && hit.d>=d){ if(hit.score>-9e8 && hit.score<9e8) return hit.score; pv=hit.best; }
+      let list=genMoves(p); if(!list.length) return inCheck(p,p.red?0:1)?-20000+d:0;
+      orderMoves(p, list, pv, ply);
+      let bestLocal=null;
+      for(const m of list){
+        p.make(m);
+        const givesCheck=inCheck(p,p.red?0:1);
+        const sc = -ab(d-1+(givesCheck?1:0), -beta, -alpha, ply+1);
+        p.unmake();
+        if(sc>alpha){ alpha=sc; bestLocal=m; if(ply===0) rootScores.set(m, sc); }
+        if(alpha>=beta){ if(!p.b[m.to]) killers[ply]={from:m.from,to:m.to}; break; }
+        if(timeUp()) break;
+      }
+      TT.set(key,{d, score:alpha, best:bestLocal}); if(TT.size>20000) TT.clear();
+      if(ply===0) bestPV=bestLocal;
+      return alpha;
+    }
+    let finalMove=null;
+    for(let d=2; d<=depth; d++){ rootScores.clear(); ab(d, -1e9, 1e9, 0); finalMove=bestPV||finalMove; if(timeUp()) break; }
+    if(!finalMove) finalMove=rootMoves[0];
+    if(randTop>1 && rootScores.size){ const arr=[...rootScores.entries()].sort((a,b)=>b[1]-a[1]); const topN=Math.min(arr.length, randTop); return arr[Math.floor(Math.random()*topN)][0]; }
+    return finalMove;
+  }catch(e){ return quickFallbackMove(p); }
+}
+
+/* ===== Audio & FX (移動音效關閉) ===== */
+let AC; function ensureAC(){ AC=AC||new (window.AudioContext||window.webkitAudioContext)(); return AC; }
+function tone(f=500,d=0.07,type='sine',gain=0.06){ try{ const ac=ensureAC(), t=ac.currentTime, o=ac.createOscillator(), g=ac.createGain(); o.type=type; o.frequency.value=f; g.gain.value=gain; o.connect(g).connect(ac.destination); o.start(t); o.stop(t+d);}catch(e){} }
+function sMove(){}
+function sCapture(){ tone(180,0.10,'square',0.09); setTimeout(()=>tone(120,0.10,'square',0.07),60); }
+function sCheck(){ tone(880,0.08,'sawtooth',0.07); setTimeout(()=>tone(660,0.10,'sawtooth',0.06),80); }
+function kingIndex(p, red){ for(let i=0;i<Squares;i++){ if(p.b[i]=== (red?P.RK:P.BK)) return i; } return -1; }
+function fxCheck(redSide){
+  const idx=kingIndex(pos, redSide); if(idx<0) return;
+  const [x,y]=g2p(F(idx),R(idx)), [cw,ch]=cell(); const r=Math.min(cw,ch)*0.6;
+  const start=performance.now(), dur=700;
+  function frame(now){
+    const t=(now-start)/dur; if(t>1){ fx.clearRect(0,0,fxC.width,fxC.height); return; }
+    const a=1-Math.pow(t,2);
+    fx.clearRect(0,0,fxC.width,fxC.height);
+    fx.save(); fx.scale(DPR,DPR); fx.translate(x,y);
+    const grd=fx.createRadialGradient(0,0, r*0.2, 0,0, r*1.6);
+    grd.addColorStop(0, redSide?'rgba(211,50,40,0.55)':'rgba(28,107,61,0.55)');
+    grd.addColorStop(1,'rgba(0,0,0,0)');
+    fx.globalAlpha=a; fx.fillStyle=grd; fx.beginPath(); fx.arc(0,0,r*1.6,0,Math.PI*2); fx.fill();
+    fx.restore();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+/* ===== Game Loop ===== */
+const pos=new Pos(); pos.setStart(); let sel=-1;
+function drawHints(from){const moves=genMoves(pos).filter(m=>m.from===from); ctx.save(); ctx.scale(DPR,DPR); ctx.fillStyle='rgba(0,0,0,.26)';
+  for(const m of moves){const [x,y]=g2p(F(m.to),R(m.to)); ctx.beginPath(); ctx.arc(x,y,6,0,Math.PI*2); ctx.fill(); } ctx.restore();}
+function drawAll(){ ctx.clearRect(0,0,cvs.width,cvs.height); board(); if(sel>=0) drawHints(sel); for(let i=0;i<Squares;i++){const pc=pos.b[i]; if(pc) drawPiece(i,pc);} msgBox.textContent= pos.red ? (inCheck(pos,0)?'你被將軍！':'現在該你走棋啦！') : '電腦思考中…'; }
+
+function moveAndFX(mv){
+  const wasCap = !!pos.b[mv.to];
+  try{
+    pos.make(mv);
+  }catch(e){
+    sel=-1; drawAll(); return;
+  }
+  if(wasCap) sCapture(); else sMove();
+  const checked = inCheck(pos, pos.red?0:1);
+  if(checked){ sCheck(); fxCheck(pos.red); }
+  drawAll();
+}
+
+let lastPointerId=null;
+function handleTapClient(e){
+  if(BUSY || !pos.red) return;
+  try{ cvs.setPointerCapture(e.pointerId); }catch(_){}
+  if(lastPointerId===e.pointerId){ } else { lastPointerId=e.pointerId; }
+  const r=cvs.getBoundingClientRect(); const idx=p2i(e.clientX-r.left,e.clientY-r.top), pc=pos.b[idx];
+  if(sel<0){ if(pc && isRed(pc)){ sel=idx; drawAll(); } return; }
+  const mv=genMoves(pos).find(m=>m.from===sel && m.to===idx);
+  if(mv){ moveAndFX(mv); sel=-1; checkEnd(); if(!pos.red){ BUSY=true; setTimeout(ai, 30);} }
+  else if(pc && isRed(pc)){ sel=idx; drawAll(); }
+  else { sel=-1; drawAll(); }
+}
+cvs.addEventListener('pointerdown',e=>{ handleTapClient(e); e.preventDefault(); }, {passive:false});
+
+function settingsByUI(){ const v=(document.getElementById('difficulty')||{}).value||'normal';
+  if(v==='easy')   return {depth:3, nodeLimit: 30000,  randTop:3, timeMs:100};
+  if(v==='normal') return {depth:4, nodeLimit: 70000,  randTop:2, timeMs:160};
+  return {depth:5, nodeLimit: 140000, randTop:1, timeMs:240};
+}
+function ai(){
+  BUSY=true;
+  setTimeout(()=>{
+    try{
+      const best=searchBest(pos, settingsByUI()) || quickFallbackMove(pos);
+      if(best){ moveAndFX(best); }
+    }catch(e){
+      const fb=quickFallbackMove(pos); if(fb){ moveAndFX(fb); msgBox.textContent='（快速招）'; }
+    }finally{
+      BUSY=false; checkEnd(); drawAll();
+    }
+  }, 0);
+}
+function repCount(){const cur=pos.key(); let c=0; for(const k of pos.reps) if(k===cur) c++; return c;}
+function checkEnd(){
+  if(document.getElementById('ruleRep')?.checked && repCount()>=3) return end('和棋（循環局面）');
+  if(document.getElementById('rule50')?.checked && pos.halfClock>=120) return end('和棋（120半步無吃無兵）');
+  const moves=genMoves(pos); if(!moves.length) return end(inCheck(pos,pos.red?0:1)?(pos.red?'黑方勝（將死）':'紅方勝（將死）'):'和棋（無著可走）');
+}
+function end(t){ setTimeout(()=>{ alert('對局結束：'+t); pos.setStart(); sel=-1; undoLeft=5; undoLeftEl.textContent=undoLeft; BUSY=false; drawAll(); },60); }
+document.getElementById('restart').onclick=()=>{ pos.setStart(); sel=-1; undoLeft=5; undoLeftEl.textContent=undoLeft; BUSY=false; drawAll(); };
+document.getElementById('undo').onclick=()=>{
+  if(undoLeft<=0){ alert('本局悔棋次數已用完（最多 5 次）'); return; }
+  if(pos.hist.length){ pos.unmake(); if(pos.hist.length) pos.unmake(); sel=-1; undoLeft--; undoLeftEl.textContent=undoLeft; BUSY=false; drawAll(); }
+};
+document.getElementById('options').onclick=()=>{ document.getElementById('modal').style.display='flex'; };
+document.getElementById('close').onclick=()=>{ document.getElementById('modal').style.display='none'; };
+drawAll();
+</script>
+</body>
+</html>
